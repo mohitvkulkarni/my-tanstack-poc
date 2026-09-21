@@ -1,6 +1,6 @@
 "use no memo";
 
-import { useState } from "react";
+import { useState, useRef } from "react";
 import {
   createColumnHelper,
   flexRender,
@@ -11,6 +11,7 @@ import {
   type SortingState,
   type ColumnFiltersState,
 } from "@tanstack/react-table";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { ArrowUpDown } from "lucide-react";
 
 import {
@@ -32,43 +33,22 @@ type TradeOrder = {
   status: string;
 };
 
-const fallbackData: TradeOrder[] = [
-  {
-    orderNumber: "ORD-1001",
-    trading: "BTC/USD",
-    orderPrice: 64250.0,
-    status: "Executed",
-  },
-  {
-    orderNumber: "ORD-1002",
-    trading: "ETH/USD",
-    orderPrice: 3450.75,
-    status: "Pending",
-  },
-  {
-    orderNumber: "ORD-1003",
-    trading: "SOL/USD",
-    orderPrice: 145.2,
-    status: "Cancelled",
-  },
-  {
-    orderNumber: "ORD-1004",
-    trading: "AAPL",
-    orderPrice: 175.5,
-    status: "Executed",
-  },
-  {
-    orderNumber: "ORD-1005",
-    trading: "TSLA",
-    orderPrice: 210.0,
-    status: "Pending",
-  },
-];
+// 1. Generate 10,000 rows to test virtualization
+const generateData = (count: number): TradeOrder[] => {
+  const statuses = ["Executed", "Pending", "Cancelled"];
+  const pairs = ["BTC/USD", "ETH/USD", "SOL/USD", "AAPL", "TSLA"];
+  return Array.from({ length: count }, (_, i) => ({
+    orderNumber: `ORD-${1000 + i}`,
+    trading: pairs[Math.floor(Math.random() * pairs.length)],
+    orderPrice: Math.random() * 50000 + 100,
+    status: statuses[Math.floor(Math.random() * statuses.length)],
+  }));
+};
 
+const fallbackData = generateData(10000);
 const columnHelper = createColumnHelper<TradeOrder>();
 
 const columns = [
-  // 1. Checkbox Column (Sorting and Filtering Disabled)
   columnHelper.display({
     id: "select",
     enableSorting: false,
@@ -133,21 +113,19 @@ const columns = [
 export function TradingTable() {
   const [data] = useState(() => fallbackData);
 
-  // 2. Add state for Sorting and Filtering
   const [rowSelection, setRowSelection] = useState({});
   const [sorting, setSorting] = useState<SortingState>([]);
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
+
+  // 2. Ref for the scrollable container
+  const tableContainerRef = useRef<HTMLDivElement>(null);
 
   const table = useReactTable({
     data,
     columns,
     getCoreRowModel: getCoreRowModel(),
-
-    // 3. Inject the Sorting and Filtering Models
     getSortedRowModel: getSortedRowModel(),
     getFilteredRowModel: getFilteredRowModel(),
-
-    // 4. Bind the state
     onSortingChange: setSorting,
     onColumnFiltersChange: setColumnFilters,
     enableRowSelection: true,
@@ -160,13 +138,39 @@ export function TradingTable() {
     },
   });
 
+  // Extract the flattened rows after filtering/sorting
+  const { rows } = table.getRowModel();
+
+  // 3. Initialize the Virtualizer
+  const rowVirtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => tableContainerRef.current,
+    estimateSize: () => 50, // Approximate row height in pixels
+    overscan: 5, // Render 5 extra rows off-screen for smooth scrolling
+  });
+
+  const virtualRows = rowVirtualizer.getVirtualItems();
+
+  // Calculate top and bottom padding to mimic the height of unrendered rows
+  const paddingTop = virtualRows.length > 0 ? virtualRows[0]?.start || 0 : 0;
+  const paddingBottom =
+    virtualRows.length > 0
+      ? rowVirtualizer.getTotalSize() -
+        (virtualRows[virtualRows.length - 1]?.end || 0)
+      : 0;
+
   return (
     <div className="p-8 max-w-5xl mx-auto">
       <h1 className="text-2xl font-bold mb-4">Trading Orders Dashboard</h1>
 
-      <div className="rounded-md border bg-card text-card-foreground shadow-sm">
+      {/* 4. The Scrollable Container with Fixed Max Height */}
+      <div
+        ref={tableContainerRef}
+        className="rounded-md border bg-card max-h-[600px] overflow-auto relative shadow-sm"
+      >
         <Table>
-          <TableHeader>
+          {/* Sticky Header so it doesn't scroll away */}
+          <TableHeader className="sticky top-0 bg-card z-10 shadow-[0_1px_0_0_hsl(var(--border))]">
             {table.getHeaderGroups().map((headerGroup) => (
               <TableRow key={headerGroup.id}>
                 {headerGroup.headers.map((header) => {
@@ -174,7 +178,6 @@ export function TradingTable() {
                     <TableHead key={header.id} className="align-top py-3">
                       {header.isPlaceholder ? null : (
                         <div className="flex flex-col gap-2">
-                          {/* 5. Sortable Column Header Button */}
                           <div className="flex items-center min-h-[32px]">
                             {header.column.getCanSort() ? (
                               <Button
@@ -196,8 +199,6 @@ export function TradingTable() {
                               )
                             )}
                           </div>
-
-                          {/* 6. Per-Column Filter Input */}
                           {header.column.getCanFilter() ? (
                             <Input
                               placeholder="Filter..."
@@ -219,22 +220,33 @@ export function TradingTable() {
             ))}
           </TableHeader>
           <TableBody>
-            {table.getRowModel().rows?.length ? (
-              table.getRowModel().rows.map((row) => (
-                <TableRow
-                  key={row.id}
-                  data-state={row.getIsSelected() && "selected"}
-                >
-                  {row.getVisibleCells().map((cell) => (
-                    <TableCell key={cell.id} className="py-3">
-                      {flexRender(
-                        cell.column.columnDef.cell,
-                        cell.getContext(),
-                      )}
-                    </TableCell>
-                  ))}
-                </TableRow>
-              ))
+            {/* Top Padding Row */}
+            {paddingTop > 0 && (
+              <tr>
+                <td style={{ height: `${paddingTop}px` }} />
+              </tr>
+            )}
+
+            {/* 5. Render Only the Virtual Items */}
+            {virtualRows.length > 0 ? (
+              virtualRows.map((virtualRow) => {
+                const row = rows[virtualRow.index]; // Retrieve the actual row data via the virtual index
+                return (
+                  <TableRow
+                    key={row.id}
+                    data-state={row.getIsSelected() && "selected"}
+                  >
+                    {row.getVisibleCells().map((cell) => (
+                      <TableCell key={cell.id} className="py-3">
+                        {flexRender(
+                          cell.column.columnDef.cell,
+                          cell.getContext(),
+                        )}
+                      </TableCell>
+                    ))}
+                  </TableRow>
+                );
+              })
             ) : (
               <TableRow>
                 <TableCell
@@ -245,12 +257,22 @@ export function TradingTable() {
                 </TableCell>
               </TableRow>
             )}
+
+            {/* Bottom Padding Row */}
+            {paddingBottom > 0 && (
+              <tr>
+                <td style={{ height: `${paddingBottom}px` }} />
+              </tr>
+            )}
           </TableBody>
         </Table>
       </div>
 
-      <div className="mt-4 text-sm text-muted-foreground">
-        Selected Row IDs: {JSON.stringify(rowSelection)}
+      <div className="mt-4 flex justify-between text-sm text-muted-foreground">
+        <div>
+          Total Rows: {rows.length} | Currently Rendered: {virtualRows.length}
+        </div>
+        <div>Selected Rows: {Object.keys(rowSelection).length}</div>
       </div>
     </div>
   );
