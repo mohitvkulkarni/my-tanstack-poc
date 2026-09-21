@@ -1,6 +1,8 @@
 "use no memo";
 
-import { useState, useRef } from "react";
+import { useState, useEffect, useRef } from "react";
+// @ts-ignore - types depend on installed AMPS client version
+import { Client, Command } from "amps";
 import {
   createColumnHelper,
   flexRender,
@@ -33,19 +35,6 @@ type TradeOrder = {
   status: string;
 };
 
-// 1. Generate 10,000 rows to test virtualization
-const generateData = (count: number): TradeOrder[] => {
-  const statuses = ["Executed", "Pending", "Cancelled"];
-  const pairs = ["BTC/USD", "ETH/USD", "SOL/USD", "AAPL", "TSLA"];
-  return Array.from({ length: count }, (_, i) => ({
-    orderNumber: `ORD-${1000 + i}`,
-    trading: pairs[Math.floor(Math.random() * pairs.length)],
-    orderPrice: Math.random() * 50000 + 100,
-    status: statuses[Math.floor(Math.random() * statuses.length)],
-  }));
-};
-
-const fallbackData = generateData(10000);
 const columnHelper = createColumnHelper<TradeOrder>();
 
 const columns = [
@@ -86,7 +75,7 @@ const columns = [
       return new Intl.NumberFormat("en-US", {
         style: "currency",
         currency: "USD",
-      }).format(amount);
+      }).format(amount || 0);
     },
   }),
   columnHelper.accessor("status", {
@@ -110,15 +99,84 @@ const columns = [
   }),
 ];
 
+// 1. Aapka Diya Hua AMPS Server URL
+const AMPS_URL = "wss://avdvdv:9011/amps/json";
+// 2. SOW Topic Name (Apne backend topic name se replace karein)
+const AMPS_TOPIC = "basket_aggregated";
+
 export function TradingTable() {
-  const [data] = useState(() => fallbackData);
+  const [data, setData] = useState<TradeOrder[]>([]);
+  const [connectionStatus, setConnectionStatus] = useState<
+    "connecting" | "connected" | "failed"
+  >("connecting");
 
   const [rowSelection, setRowSelection] = useState({});
   const [sorting, setSorting] = useState<SortingState>([]);
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
 
-  // 2. Ref for the scrollable container
   const tableContainerRef = useRef<HTMLDivElement>(null);
+
+  // 3. AMPS WebSocket Connection & SOW Subscription Hook
+  useEffect(() => {
+    let client: any = null;
+    const orderMap = new Map<string, TradeOrder>();
+
+    async function initAmps() {
+      try {
+        setConnectionStatus("connecting");
+        console.log(`Connecting to AMPS URL: ${AMPS_URL}...`);
+
+        // Unique Client Name generate karein
+        const clientId = `otgrid-client-${Math.random().toString(36).substring(2, 9)}`;
+        client = new Client(clientId);
+
+        await client.connect(AMPS_URL);
+        setConnectionStatus("connected");
+        console.log("AMPS Connected successfully!");
+
+        // SOW snapshot + real-time subscription command
+        const cmd = new Command("sow_and_subscribe")
+          .topic(AMPS_TOPIC)
+          .options("oof");
+
+        await client.execute(cmd, (message: any) => {
+          const raw = message.getData();
+          if (!raw) return;
+
+          const order: TradeOrder =
+            typeof raw === "string" ? JSON.parse(raw) : raw;
+
+          if (message.isOOF && message.isOOF()) {
+            orderMap.delete(order.orderNumber);
+          } else {
+            // SOW snapshot ya live price updates ko merge karein
+            orderMap.set(order.orderNumber, {
+              ...orderMap.get(order.orderNumber),
+              ...order,
+            });
+          }
+
+          // Real-time updates ko state mein daalein
+          setData(Array.from(orderMap.values()));
+        });
+      } catch (err) {
+        console.error("AMPS Connection Error:", err);
+        setConnectionStatus("failed");
+      }
+    }
+
+    initAmps();
+
+    return () => {
+      if (client) {
+        try {
+          client.disconnect();
+        } catch (e) {
+          console.error("AMPS Disconnect Error:", e);
+        }
+      }
+    };
+  }, []);
 
   const table = useReactTable({
     data,
@@ -130,7 +188,7 @@ export function TradingTable() {
     onColumnFiltersChange: setColumnFilters,
     enableRowSelection: true,
     onRowSelectionChange: setRowSelection,
-    getRowId: (row) => row.orderNumber,
+    getRowId: (row) => row.orderNumber, // Primary Key binding
     state: {
       rowSelection,
       sorting,
@@ -138,20 +196,17 @@ export function TradingTable() {
     },
   });
 
-  // Extract the flattened rows after filtering/sorting
   const { rows } = table.getRowModel();
 
-  // 3. Initialize the Virtualizer
+  // Virtualization for high-frequency incoming stream
   const rowVirtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => tableContainerRef.current,
-    estimateSize: () => 50, // Approximate row height in pixels
-    overscan: 5, // Render 5 extra rows off-screen for smooth scrolling
+    estimateSize: () => 50,
+    overscan: 5,
   });
 
   const virtualRows = rowVirtualizer.getVirtualItems();
-
-  // Calculate top and bottom padding to mimic the height of unrendered rows
   const paddingTop = virtualRows.length > 0 ? virtualRows[0]?.start || 0 : 0;
   const paddingBottom =
     virtualRows.length > 0
@@ -161,76 +216,94 @@ export function TradingTable() {
 
   return (
     <div className="p-8 max-w-5xl mx-auto">
-      <h1 className="text-2xl font-bold mb-4">Trading Orders Dashboard</h1>
+      <div className="flex justify-between items-center mb-4">
+        <div>
+          <h1 className="text-2xl font-bold">Trading Orders Dashboard</h1>
+          <p className="text-xs text-muted-foreground mt-1">
+            Endpoint: {AMPS_URL}
+          </p>
+        </div>
 
-      {/* 4. The Scrollable Container with Fixed Max Height */}
+        {/* Real-time Connection Status Indicator */}
+        <span
+          className={`px-3 py-1 rounded-full text-xs font-semibold ${
+            connectionStatus === "connected"
+              ? "bg-green-100 text-green-800"
+              : connectionStatus === "connecting"
+                ? "bg-yellow-100 text-yellow-800 animate-pulse"
+                : "bg-red-100 text-red-800"
+          }`}
+        >
+          {connectionStatus === "connected"
+            ? "AMPS Live 🟢"
+            : connectionStatus === "connecting"
+              ? "Connecting to AMPS 🟡"
+              : "AMPS Failed 🔴"}
+        </span>
+      </div>
+
       <div
         ref={tableContainerRef}
         className="rounded-md border bg-card max-h-[600px] overflow-auto relative shadow-sm"
       >
         <Table>
-          {/* Sticky Header so it doesn't scroll away */}
           <TableHeader className="sticky top-0 bg-card z-10 shadow-[0_1px_0_0_hsl(var(--border))]">
             {table.getHeaderGroups().map((headerGroup) => (
               <TableRow key={headerGroup.id}>
-                {headerGroup.headers.map((header) => {
-                  return (
-                    <TableHead key={header.id} className="align-top py-3">
-                      {header.isPlaceholder ? null : (
-                        <div className="flex flex-col gap-2">
-                          <div className="flex items-center min-h-[32px]">
-                            {header.column.getCanSort() ? (
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                className="-ml-3 h-8 data-[state=open]:bg-accent hover:bg-muted"
-                                onClick={header.column.getToggleSortingHandler()}
-                              >
-                                {flexRender(
-                                  header.column.columnDef.header,
-                                  header.getContext(),
-                                )}
-                                <ArrowUpDown className="ml-2 h-4 w-4 text-muted-foreground" />
-                              </Button>
-                            ) : (
-                              flexRender(
+                {headerGroup.headers.map((header) => (
+                  <TableHead key={header.id} className="align-top py-3">
+                    {header.isPlaceholder ? null : (
+                      <div className="flex flex-col gap-2">
+                        <div className="flex items-center min-h-[32px]">
+                          {header.column.getCanSort() ? (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="-ml-3 h-8 data-[state=open]:bg-accent hover:bg-muted"
+                              onClick={header.column.getToggleSortingHandler()}
+                            >
+                              {flexRender(
                                 header.column.columnDef.header,
                                 header.getContext(),
-                              )
-                            )}
-                          </div>
-                          {header.column.getCanFilter() ? (
-                            <Input
-                              placeholder="Filter..."
-                              value={
-                                (header.column.getFilterValue() ?? "") as string
-                              }
-                              onChange={(event) =>
-                                header.column.setFilterValue(event.target.value)
-                              }
-                              className="h-8 w-full min-w-[120px] text-xs font-normal"
-                            />
-                          ) : null}
+                              )}
+                              <ArrowUpDown className="ml-2 h-4 w-4 text-muted-foreground" />
+                            </Button>
+                          ) : (
+                            flexRender(
+                              header.column.columnDef.header,
+                              header.getContext(),
+                            )
+                          )}
                         </div>
-                      )}
-                    </TableHead>
-                  );
-                })}
+                        {header.column.getCanFilter() ? (
+                          <Input
+                            placeholder="Filter..."
+                            value={
+                              (header.column.getFilterValue() ?? "") as string
+                            }
+                            onChange={(event) =>
+                              header.column.setFilterValue(event.target.value)
+                            }
+                            className="h-8 w-full min-w-[120px] text-xs font-normal"
+                          />
+                        ) : null}
+                      </div>
+                    )}
+                  </TableHead>
+                ))}
               </TableRow>
             ))}
           </TableHeader>
           <TableBody>
-            {/* Top Padding Row */}
             {paddingTop > 0 && (
               <tr>
                 <td style={{ height: `${paddingTop}px` }} />
               </tr>
             )}
 
-            {/* 5. Render Only the Virtual Items */}
             {virtualRows.length > 0 ? (
               virtualRows.map((virtualRow) => {
-                const row = rows[virtualRow.index]; // Retrieve the actual row data via the virtual index
+                const row = rows[virtualRow.index];
                 return (
                   <TableRow
                     key={row.id}
@@ -253,12 +326,15 @@ export function TradingTable() {
                   colSpan={columns.length}
                   className="h-24 text-center text-muted-foreground"
                 >
-                  No orders match your filters.
+                  {connectionStatus === "connected"
+                    ? "No orders found in this SOW topic."
+                    : connectionStatus === "connecting"
+                      ? "Connecting and fetching SOW snapshot..."
+                      : "Unable to connect to AMPS WebSocket."}
                 </TableCell>
               </TableRow>
             )}
 
-            {/* Bottom Padding Row */}
             {paddingBottom > 0 && (
               <tr>
                 <td style={{ height: `${paddingBottom}px` }} />
@@ -270,9 +346,9 @@ export function TradingTable() {
 
       <div className="mt-4 flex justify-between text-sm text-muted-foreground">
         <div>
-          Total Rows: {rows.length} | Currently Rendered: {virtualRows.length}
+          Total Orders in SOW: {rows.length} | Rendered: {virtualRows.length}
         </div>
-        <div>Selected Rows: {Object.keys(rowSelection).length}</div>
+        <div>Selected Orders: {Object.keys(rowSelection).length}</div>
       </div>
     </div>
   );
