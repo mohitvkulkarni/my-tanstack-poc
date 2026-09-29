@@ -1,549 +1,399 @@
-import { createColumnHelper, type CellContext } from "@tanstack/react-table";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
+import {
+  flexRender,
+  getCoreRowModel,
+  getFilteredRowModel,
+  getSortedRowModel,
+  useReactTable,
+  type CellContext,
+  type ColumnDef,
+  type ColumnFiltersState,
+  type HeaderContext,
+  type RowSelectionState,
+  type SortingState,
+  type Table as TanStackTable,
+} from "@tanstack/react-table";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import { ArrowUpDown } from "lucide-react";
 
-// message.header carries the AMPS envelope metadata (command, topic, subIds, ...
-export type BasketOrder = {
-  listID?: string;
-  deskID?: string;
-  transactTime?: string;
-  listName?: string;
-  ric?: string;
-  username?: string;
-  ordStatus?: string;
-  basketSide?: string;
-  totalUnit?: number;
-  pctWaved?: number;
-  pctExec?: number;
-  pctUnwaved?: number;
-  pctSSRestricted?: number;
-  execPx?: number;
-  usdOrd?: number;
-  usdLive?: number;
-  usdExec?: number;
-  usdAvail?: number;
-  usdRejected?: number;
-  usdNonTrd?: number;
-  usdCanceled?: number;
-  usdPending?: number;
-  usdPendingCancel?: number;
-  usdPendingLocate?: number;
-  fxRate?: number;
-  numOrders?: number;
-  numPendingLocate?: number;
-  createDate?: string;
-  createTime?: string;
-  ioiStatus?: string;
-  usdInit?: number;
-  usdNotionalTotal?: number;
-  usdCash?: number;
-  usdHalted?: number;
-  usdSSRestricted?: number;
-  totalQty?: number;
-  nonTrdQty?: number;
-  ordQty?: number;
-  availQty?: number;
-  liveQty?: number;
-  cumQty?: number;
-  unExecQty?: number;
-  rejQty?: number;
-  cxlQty?: number;
-  pendQty?: number;
-  pendCxlQty?: number;
-  pendLocQty?: number;
-  securityDesc?: string;
-  restrictedCategory?: string;
-  bbg?: string;
-  usdInitBuy?: number;
-  usdInitSell?: number;
-  usdNotionalExecBuy?: number;
-  usdNotionalExecSell?: number;
-  usdNotionalUnexec?: number;
-  numCanceled?: number;
-  numFilled?: number;
-  numPendingCxl?: number;
-  execUnit?: number;
-  unexecUnit?: number;
-  execAtLast?: number;
-  execAtBid?: number;
-  execAtMid?: number;
-  execAtAsk?: number;
-  execAtPrevClose?: number;
-  ccy?: string;
-  tradingAccount?: string;
-  iNavAchvd?: number;
-  iNavExp?: number;
-  benchmark?: number;
-  numHalted?: number;
-  numSSRestricted?: number;
-  doNotTrade?: number;
-};
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 
-// One row rendered in the table: the business record plus the SQL key (from ...
-export type MessageRow = BasketOrder & {
-  key: string;
-  __loading?: boolean;
-};
-
-export const AMPS_URL =
-  "wss://lrdeqotap01u.eur.nsroot.net:9011/amps/json";
-
-// apac "wss://lhkeqotap4u.apac.nsroot.net:9011/amps/json";
-
-export const AMPS_TOPIC = "basket_aggregated";
-
-const currencyFormatter = new Intl.NumberFormat("en-US", {
-  style: "currency",
-  currency: "USD",
-  maximumFractionDigits: 0,
-});
-
-export function formatCurrency(value: number | undefined | null) {
-  if (value === undefined || value === null || Number.isNaN(value)) return "";
-  return currencyFormatter.format(value);
+// The select-all checkbox tri-state, extracted to avoid a nested ternary.
+function getSelectAllChecked<TData>(
+  table: TanStackTable<TData>,
+): boolean | "indeterminate" {
+  if (table.getIsAllRowsSelected()) return true;
+  if (table.getIsSomeRowsSelected()) return "indeterminate";
+  return false;
 }
 
-export function formatPercent(value: number | undefined | null) {
-  if (value === undefined || value === null || Number.isNaN(value)) return "";
-  return `${value.toFixed(2)}%`;
-}
-
-export function formatNumber(
-  value: number | undefined | null,
-  decimals = 0
-) {
-  if (value === undefined || value === null || Number.isNaN(value)) return "";
-
-  return value.toLocaleString("en-US", {
-    minimumFractionDigits: decimals,
-    maximumFractionDigits: decimals,
-  });
-}
-
-const columnHelper = createColumnHelper<MessageRow>();
-
-// Maps an order status to its badge colour classes. Extracted to a lookup so ...
-const ORDER_STATUS_BADGE_CLASSES: Record<string, string> = {
-  FILLED: "bg-green-100 text-green-700",
-  NEW: "bg-yellow-100 text-yellow-700",
-};
-
-function orderStatusBadgeClass(status: string): string {
-  return ORDER_STATUS_BADGE_CLASSES[status] ?? "bg-red-100 text-red-700";
-}
-
-// Shared cell renderers -- most columns below just right-align a formatted ...
-type NumericCell = CellContext<MessageRow, number | undefined>;
-type TextCell = CellContext<MessageRow, string | undefined>;
-
-function currencyCell(info: NumericCell) {
+// Selection checkboxes defined at module scope so they are not nested inside
+// the column definition / parent component (SonarQube S6478).
+function SelectAllCheckbox<TData>({
+  table,
+}: HeaderContext<TData, unknown>) {
   return (
-    <span className="block text-right">
-      {formatCurrency(info.getValue())}
-    </span>
+    <Checkbox
+      checked={getSelectAllChecked(table)}
+      onCheckedChange={(value) => table.toggleAllRowsSelected(value === true)}
+      aria-label="Select all"
+    />
   );
 }
 
-function numberCell(decimals = 0) {
-  return (info: NumericCell) => (
-    <span className="block text-right">
-      {formatNumber(info.getValue(), decimals)}
-    </span>
-  );
-}
-
-function percentCell(info: NumericCell) {
+function RowSelectCheckbox<TData>({
+  row,
+}: CellContext<TData, unknown>) {
   return (
-    <span className="block text-right">
-      {formatPercent(info.getValue())}
-    </span>
+    <Checkbox
+      checked={row.getIsSelected()}
+      disabled={!row.getCanSelect()}
+      onCheckedChange={(value) => row.toggleSelected(value === true)}
+      aria-label="Select row"
+    />
   );
 }
 
-function monoCell(info: TextCell) {
-  return (
-    <span className="font-mono text-xs">
-      {info.getValue()}
-    </span>
-  );
+export interface DataTableProps<TData> {
+  /** Row data. Pass a new array reference whenever rows change (e.g. a live feed). */
+  data: TData[];
+
+  /** Column definitions, e.g. built with @tanstack/react-table's `createColumnHelper`. */
+  columns: ColumnDef<TData, any>[];
+
+  /** Derive a stable unique id per row. Strongly recommended for live/streaming data. */
+  getRowId?: (row: TData, index: number) => string;
+
+  /** Enable row selection state tracking. Default true. */
+  enableRowSelection?: boolean;
+
+  /** Render a built-in checkbox column (select-all header + per-row checkbox). Default false. */
+  showSelectionColumn?: boolean;
+
+  /** Content shown in place of rows when data is empty. */
+  emptyMessage?: ReactNode;
+
+  /** Max height of the scrollable table body (CSS value), e.g. "600px". Default "600px". */
+  maxHeight?: string;
+
+  /** Enable viewport fill mode. */
+  fillViewport?: boolean;
+
+  /** Extra bottom gap in px when calculating the available viewport height. */
+  viewportBottomGap?: number;
+
+  /** Estimated row height in px, used by the row virtualizer. Default 50. */
+  estimateRowHeight?: number;
+
+  /** Extra rows rendered outside the visible viewport. Default 5. */
+  overscan?: number;
+
+  /** Extra class names applied to the outer wrapper. */
+  className?: string;
+
+  /** Called whenever row selection changes. */
+  onRowSelectionChange?: (selection: RowSelectionState) => void;
+
+  /** Called whenever the visible row range changes. */
+  onRangeChange?: (range: { startIndex: number; endIndex: number }) => void;
+
+  /** Enable manual/server-side sorting. */
+  manualSorting?: boolean;
+
+  /**
+   * Called whenever the user toggles a column sort (header click). Combine
+   * with `manualSorting` to drive a server-side sort instead of a client one.
+   */
+  onSortingChange?: (sorting: SortingState) => void;
+
+  /** Initial sorting state. */
+  initialSorting?: SortingState;
+
+  /** Enable manual/server-side filtering. */
+  manualFiltering?: boolean;
+
+  /** Called whenever column filters change. */
+  onColumnFiltersChange?: (filters: ColumnFiltersState) => void;
+
+  /** Render a footer below the table, given live row/selection counts. */
+  renderFooter?: (info: {
+    totalRows: number;
+    renderedRows: number;
+    selectedCount: number;
+  }) => ReactNode;
 }
 
-function plainCell(info: TextCell) {
-  return info.getValue();
-}
+export function DataTable<TData>({
+  data,
+  columns,
+  getRowId,
+  enableRowSelection = true,
+  showSelectionColumn = false,
+  emptyMessage = "No data.",
+  maxHeight = "600px",
+  fillViewport = false,
+  viewportBottomGap = 24,
+  estimateRowHeight = 50,
+  overscan = 5,
+  className,
+  onRowSelectionChange: onRowSelectionChangeProp,
+  onRangeChange,
+  manualSorting = false,
+  onSortingChange: onSortingChangeProp,
+  initialSorting,
+  manualFiltering = false,
+  onColumnFiltersChange: onColumnFiltersChangeProp,
+  renderFooter,
+}: DataTableProps<TData>) {
+  const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
+  const [sorting, setSorting] = useState<SortingState>(initialSorting ?? []);
+  const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
 
-// `usdNetTotal` isn't published as its own field on the `basket_aggregated` ...
-function computeNetTotal(row: MessageRow): number | undefined {
-  if (
-    row.usdNotionalTotal === undefined ||
-    row.usdNotionalTotal === null
-  ) {
-    return undefined;
-  }
+  const tableContainerRef = useRef<HTMLDivElement>(null);
 
-  const sign = row.basketSide === "BUY" ? 1 : -1;
-  return sign * row.usdNotionalTotal;
-}
+  // When `fillViewport` is on, measure the distance from the top of the scroll
+  // container to the bottom of the browser viewport.
+  const [viewportHeight, setViewportHeight] = useState<number | null>(null);
 
-// Same idea as `computeNetTotal`, but signing the *executed* notional.
-function computeNetExec(row: MessageRow): number | undefined {
-  if (row.usdExec === undefined || row.usdExec === null) {
-    return undefined;
-  }
+  useEffect(() => {
+    if (!fillViewport) {
+      setViewportHeight(null);
+      return;
+    }
 
-  const sign = row.basketSide === "BUY" ? 1 : -1;
-  return sign * row.usdExec;
-}
+    const measure = () => {
+      const el = tableContainerRef.current;
+      if (!el) return;
 
-export const columns = [
-  columnHelper.accessor("deskID", {
-    header: "Desk ID",
-    cell: (info) =>
-      info.row.original.__loading ? (
-        <span className="inline-block h-3 w-16 animate-pulse rounded bg-muted" />
-      ) : (
-        info.getValue()
-      ),
-  }),
+      const top = el.getBoundingClientRect().top;
+      const available = window.innerHeight - top - viewportBottomGap;
+      setViewportHeight(Math.max(available, 120));
+    };
 
-  columnHelper.accessor("transactTime", {
-    header: "Create DateTime",
-    cell: monoCell,
-  }),
+    measure();
+    window.addEventListener("resize", measure);
 
-  columnHelper.accessor("listName", {
-    header: "Name",
-    cell: plainCell,
-  }),
+    return () => window.removeEventListener("resize", measure);
+  }, [fillViewport, viewportBottomGap]);
 
-  columnHelper.accessor("ric", {
-    header: "RIC",
-    cell: plainCell,
-  }),
+  const resolvedHeight =
+    fillViewport && viewportHeight != null ? `${viewportHeight}px` : maxHeight;
 
-  columnHelper.accessor("usdOrd", {
-    header: "$ Ord",
-    cell: currencyCell,
-  }),
+  // Optionally prepend a checkbox column so selection is usable straight from
+  // the UI without callers having to define their own select column.
+  const resolvedColumns = useMemo<ColumnDef<TData, any>[]>(() => {
+    if (!showSelectionColumn) return columns;
 
-  columnHelper.accessor("username", {
-    header: "Trader",
-    cell: (info) => (
-      <span className="font-medium">{info.getValue()}</span>
-    ),
-  }),
+    const selectionColumn: ColumnDef<TData, any> = {
+      id: "__select__",
+      enableSorting: false,
+      enableColumnFilter: false,
+      size: 40,
+      header: SelectAllCheckbox,
+      cell: RowSelectCheckbox,
+    };
 
-  columnHelper.accessor("ordStatus", {
-    header: "Status",
-    cell: (info) => {
-      const status = info.getValue();
+    return [selectionColumn, ...columns];
+  }, [columns, showSelectionColumn]);
 
-      if (!status) return null;
-
-      return (
-        <span
-          className={`px-2 py-1 rounded-full text-xs font-medium ${orderStatusBadgeClass(
-            status
-          )}`}
-        >
-          {status}
-        </span>
-      );
+  const table = useReactTable({
+    data,
+    columns: resolvedColumns,
+    getRowId,
+    getSortedRowModel: manualSorting ? undefined : getSortedRowModel(),
+    manualSorting,
+    getFilteredRowModel: manualFiltering ? undefined : getFilteredRowModel(),
+    manualFiltering,
+    onSortingChange: setSorting,
+    onColumnFiltersChange: setColumnFilters,
+    enableRowSelection,
+    onRowSelectionChange: setRowSelection,
+    state: {
+      rowSelection,
+      sorting,
+      columnFilters,
     },
-  }),
+    getCoreRowModel: getCoreRowModel(),
+  });
 
-  columnHelper.accessor(computeNetTotal, {
-    id: "usdNetTotal",
-    header: "$ Net Total",
-    cell: currencyCell,
-  }),
+  // Notify callers of sorting/selection changes from a passive effect rather
+  // than from render.
+  useEffect(() => {
+    onSortingChangeProp?.(sorting);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sorting]);
 
-  columnHelper.accessor(computeNetExec, {
-    id: "usdNetExec",
-    header: "$ Net Exec",
-    cell: currencyCell,
-  }),
+  useEffect(() => {
+    onRowSelectionChangeProp?.(rowSelection);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rowSelection]);
 
-  columnHelper.accessor("totalUnit", {
-    header: "Total Unit",
-    cell: numberCell(),
-  }),
+  useEffect(() => {
+    onColumnFiltersChangeProp?.(columnFilters);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [columnFilters]);
 
-  columnHelper.accessor("pctWaved", {
-    header: "% Waved",
-    cell: percentCell,
-  }),
+  const { rows } = table.getRowModel();
 
-  columnHelper.accessor("pctExec", {
-    header: "% Exec",
-    cell: percentCell,
-  }),
+  // Virtualization keeps rendering cheap for high-frequency / large row counts.
+  const rowVirtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => tableContainerRef.current,
+    estimateSize: () => estimateRowHeight,
+    overscan,
+  });
 
-  columnHelper.accessor("pctUnwaved", {
-    header: "% Unwaved",
-    cell: percentCell,
-  }),
+  const virtualRows = rowVirtualizer.getVirtualItems();
+  const paddingTop =
+    virtualRows.length > 0 ? virtualRows[0]?.start || 0 : 0;
+  const paddingBottom =
+    virtualRows.length > 0
+      ? rowVirtualizer.getTotalSize() -
+        (virtualRows[virtualRows.length - 1]?.end || 0)
+      : 0;
 
-  columnHelper.accessor("pctSSRestricted", {
-    header: "% SS Restricted",
-    cell: percentCell,
-  }),
+  const firstVisibleIndex = virtualRows[0]?.index;
+  const lastVisibleIndex =
+    virtualRows[virtualRows.length - 1]?.index;
 
-  columnHelper.accessor("execPx", {
-    header: "Exec Px",
-    cell: numberCell(4),
-  }),
+  // Notify the caller of the currently visible row window. Keyed on the
+  // virtualizer's computed indexes.
+  useEffect(() => {
+    if (!onRangeChange) return;
+    if (firstVisibleIndex === undefined || lastVisibleIndex === undefined) {
+      return;
+    }
 
-  columnHelper.accessor("usdLive", {
-    header: "$ Live",
-    cell: currencyCell,
-  }),
+    onRangeChange({
+      startIndex: firstVisibleIndex,
+      endIndex: lastVisibleIndex,
+    });
+  }, [firstVisibleIndex, lastVisibleIndex, onRangeChange]);
 
-  columnHelper.accessor("usdExec", {
-    header: "$ Exec",
-    cell: currencyCell,
-  }),
+  return (
+    <div className={className}>
+      <div
+        ref={tableContainerRef}
+        className="rounded-md border bg-card overflow-auto relative shadow-sm"
+        // minHeight matches maxHeight so the container reserves its full
+        // height while the virtualized rows are being rendered.
+        style={{ maxHeight: resolvedHeight, minHeight: resolvedHeight }}
+      >
+        <Table>
+          <TableHeader className="sticky top-0 bg-card z-10 shadow-[0_1px_0_0_hsl(var(--border))]">
+            {table.getHeaderGroups().map((headerGroup) => (
+              <TableRow key={headerGroup.id}>
+                {headerGroup.headers.map((header) => (
+                  <TableHead key={header.id} className="align-top py-3">
+                    {header.isPlaceholder ? null : (
+                      <div className="flex flex-col gap-2">
+                        <div className="flex items-center min-h-[32px]">
+                          {header.column.getCanSort() ? (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="-ml-3 h-8 data-[state=open]:bg-accent hover:bg-muted"
+                              onClick={header.column.getToggleSortingHandler()}
+                            >
+                              {flexRender(
+                                header.column.columnDef.header,
+                                header.getContext(),
+                              )}
+                              <ArrowUpDown className="ml-2 h-4 w-4 text-muted-foreground" />
+                            </Button>
+                          ) : (
+                            flexRender(
+                              header.column.columnDef.header,
+                              header.getContext(),
+                            )
+                          )}
+                        </div>
 
-  columnHelper.accessor("usdAvail", {
-    header: "$ Avail",
-    cell: currencyCell,
-  }),
+                        {header.column.getCanFilter() ? (
+                          <Input
+                            placeholder="Filter..."
+                            value={
+                              (header.column.getFilterValue() ?? "") as string
+                            }
+                            onChange={(event) =>
+                              header.column.setFilterValue(
+                                event.target.value,
+                              )
+                            }
+                            className="h-8 w-full min-w-[120px] text-xs font-normal"
+                          />
+                        ) : null}
+                      </div>
+                    )}
+                  </TableHead>
+                ))}
+              </TableRow>
+            ))}
+          </TableHeader>
 
-  columnHelper.accessor("usdRejected", {
-    header: "$ Rejected",
-    cell: currencyCell,
-  }),
+          <TableBody>
+            {paddingTop > 0 && (
+              <tr>
+                <td style={{ height: `${paddingTop}px` }} />
+              </tr>
+            )}
 
-  columnHelper.accessor("usdNonTrd", {
-    header: "$ NonTrd",
-    cell: currencyCell,
-  }),
+            {virtualRows.length > 0 ? (
+              virtualRows.map((virtualRow) => {
+                const row = rows[virtualRow.index];
 
-  columnHelper.accessor("usdCanceled", {
-    header: "$ Cxl",
-    cell: currencyCell,
-  }),
+                return (
+                  <TableRow
+                    key={row.id}
+                    data-state={row.getIsSelected() && "selected"}
+                  >
+                    {row.getVisibleCells().map((cell) => (
+                      <TableCell key={cell.id} className="py-3">
+                        {flexRender(
+                          cell.column.columnDef.cell,
+                          cell.getContext(),
+                        )}
+                      </TableCell>
+                    ))}
+                  </TableRow>
+                );
+              })
+            ) : (
+              <TableRow>
+                <TableCell
+                  colSpan={resolvedColumns.length}
+                  className="h-24 text-center text-muted-foreground"
+                >
+                  {emptyMessage}
+                </TableCell>
+              </TableRow>
+            )}
 
-  columnHelper.accessor("usdPending", {
-    header: "$ Pend",
-    cell: currencyCell,
-  }),
+            {paddingBottom > 0 && (
+              <tr>
+                <td style={{ height: `${paddingBottom}px` }} />
+              </tr>
+            )}
+          </TableBody>
+        </Table>
+      </div>
 
-  columnHelper.accessor("usdPendingCancel", {
-    header: "$ Pend Cxl",
-    cell: currencyCell,
-  }),
-
-  columnHelper.accessor("usdPendingLocate", {
-    header: "$ Pend Loc",
-    cell: currencyCell,
-  }),
-
-  columnHelper.accessor("fxRate", {
-    header: "FX Rate",
-    cell: numberCell(4),
-  }),
-
-  columnHelper.accessor("numOrders", {
-    header: "# Ords",
-    cell: numberCell(),
-  }),
-
-  columnHelper.accessor("numPendingLocate", {
-    header: "# Pend Loc",
-    cell: numberCell(),
-  }),
-
-  columnHelper.accessor("createDate", {
-    header: "Create Date",
-    cell: monoCell,
-  }),
-
-  columnHelper.accessor("createTime", {
-    header: "Create Time",
-    cell: monoCell,
-  }),
-
-  columnHelper.accessor("listID", {
-    header: "ID",
-    cell: plainCell,
-  }),
-
-  columnHelper.accessor("ioiStatus", {
-    header: "IOI Status",
-    cell: plainCell,
-  }),
-
-  columnHelper.accessor("usdInit", {
-    header: "$ Init",
-    cell: currencyCell,
-  }),
-
-  columnHelper.accessor("usdNotionalTotal", {
-    header: "$ Total",
-    cell: currencyCell,
-  }),
-
-  columnHelper.accessor("usdCash", {
-    header: "$ Cash",
-    cell: currencyCell,
-  }),
-
-  columnHelper.accessor("usdHalted", {
-    header: "$ Halted",
-    cell: currencyCell,
-  }),
-
-  columnHelper.accessor("usdSSRestricted", {
-    header: "$ SS Restricted",
-    cell: currencyCell,
-  }),
-
-  columnHelper.accessor("totalQty", {
-    header: "Total Qty",
-    cell: numberCell(),
-  }),
-
-  columnHelper.accessor("nonTrdQty", {
-    header: "NonTrd Qty",
-    cell: numberCell(),
-  }),
-
-  columnHelper.accessor("ordQty", {
-    header: "Ord Qty",
-    cell: numberCell(),
-  }),
-
-  columnHelper.accessor("availQty", {
-    header: "Avail Qty",
-    cell: numberCell(),
-  }),
-
-  columnHelper.accessor("liveQty", {
-    header: "Live Qty",
-    cell: numberCell(),
-  }),
-
-  columnHelper.accessor("cumQty", {
-    header: "Exec Qty",
-    cell: numberCell(),
-  }),
-
-  columnHelper.accessor("unExecQty", {
-    header: "Unexec Qty",
-    cell: numberCell(),
-  }),
-
-  columnHelper.accessor("rejQty", {
-    header: "Rej Qty",
-    cell: numberCell(),
-  }),
-
-  columnHelper.accessor("cxlQty", {
-    header: "Cxl Qty",
-    cell: numberCell(),
-  }),
-
-  columnHelper.accessor("pendQty", {
-    header: "Pend Qty",
-    cell: numberCell(),
-  }),
-
-  columnHelper.accessor("pendCxlQty", {
-    header: "Pend Cxl Qty",
-    cell: numberCell(),
-  }),
-
-  columnHelper.accessor("pendLocQty", {
-    header: "Pend Loc Qty",
-    cell: numberCell(),
-  }),
-
-  columnHelper.accessor("securityDesc", {
-    header: "Security Desc",
-    cell: plainCell,
-  }),
-
-  columnHelper.accessor("restrictedCategory", {
-    header: "Restrictions",
-    cell: plainCell,
-  }),
-
-  columnHelper.accessor("bbg", {
-    header: "BBG",
-    cell: plainCell,
-  }),
-
-  columnHelper.accessor("usdInitBuy", {
-    header: "$ Init Buy",
-    cell: currencyCell,
-  }),
-
-  columnHelper.accessor("usdInitSell", {
-    header: "$ Init Sell",
-    cell: currencyCell,
-  }),
-
-  columnHelper.accessor("usdNotionalExecBuy", {
-    header: "$ Exec Buy",
-    cell: currencyCell,
-  }),
-
-  columnHelper.accessor("usdNotionalExecSell", {
-    header: "$ Exec Sell",
-    cell: currencyCell,
-  }),
-
-  columnHelper.accessor("usdNotionalUnexec", {
-    header: "$ Unexec",
-    cell: currencyCell,
-  }),
-
-  columnHelper.accessor("numCanceled", {
-    header: "# Cxl",
-    cell: numberCell(),
-  }),
-
-  columnHelper.accessor("numFilled", {
-    header: "# Fild",
-    cell: numberCell(),
-  }),
-
-  columnHelper.accessor("numPendingCxl", {
-    header: "# Pnd Cxl",
-    cell: numberCell(),
-  }),
-
-  columnHelper.accessor("execUnit", {
-    header: "Exec Unit",
-    cell: numberCell(),
-  }),
-
-  columnHelper.accessor("unexecUnit", {
-    header: "Unexec Unit",
-    cell: numberCell(),
-  }),
-
-  // execAtLast / execAtBid / execAtMid / execAtAsk / execAtPrevClose,
-  // iNavExp, benchmark, numHalted and doNotTrade columns are disabled --
-  // re-add with `cell: numberCell()` (or `numberCell(2)` for the iNav ones)
-  // if they need to be surfaced again.
-
-  columnHelper.accessor("ccy", {
-    header: "CCY",
-    cell: plainCell,
-  }),
-
-  columnHelper.accessor("tradingAccount", {
-    header: "Trading Account",
-    cell: plainCell,
-  }),
-
-  columnHelper.accessor("iNavAchvd", {
-    header: "iNav Achvd",
-    cell: numberCell(2),
-  }),
-
-  columnHelper.accessor("numSSRestricted", {
-    header: "# SS Restricted",
-    cell: numberCell(),
-  }),
-];
+      {renderFooter?.({
+        totalRows: rows.length,
+        renderedRows: virtualRows.length,
+        selectedCount: table.getSelectedRowModel().rows.length,
+      })}
+    </div>
+  );
+}
