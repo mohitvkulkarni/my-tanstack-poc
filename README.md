@@ -1,25 +1,25 @@
-Yes. Let's make this **copy-pasteable against the code in your screenshots**, without inventing a `getRowKey()` function.
+Yes. Let’s make this the **single final change** so you don't end up chasing five different versions of the same fix like a React bug-themed scavenger hunt.
 
-Your screenshot shows that the AMPS key is:
+The goal is:
 
-```tsx
-const key: string | undefined = message.sowKey?.() || record.listId;
-```
+1. AMPS messages are still batched.
+2. `scheduleFlush` still exists because you need it to batch frequent updates.
+3. `setWindowRows` only produces a new array when a **visible row actually changed**.
+4. AMPS updates for rows outside the current viewport do **nothing to React state**.
+5. `MessageRow` stays a `MessageRow`. We do **not** shove a `BasketOrder` into it.
+6. Multiple AMPS updates for the same row are collapsed into one update.
 
-So we'll use `record.listId` for the loaded rows.
+---
 
-## 1. Replace your current `scheduleFlush` block
+# 1. Replace your `scheduleFlush` section with this
 
-Replace this entire section:
+Replace your current:
 
 ```tsx
 const FLUSH_THROTTLE_MS = 500;
-const pendingPatchesRef = useRef<Map<string, BasketOrder | null>>(new Map());
-const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-const scheduleFlush = useCallback(() => {
-   ...
-}, []);
+const pendingPatchesRef = ...
+const flushTimerRef = ...
+const scheduleFlush = ...
 ```
 
 with:
@@ -31,12 +31,12 @@ const pendingPatchesRef = useRef<Map<string, BasketOrder | null>>(
   new Map(),
 );
 
-const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+  null,
+);
 
 const scheduleFlush = useCallback(() => {
-  // Do not schedule another timer if one is already waiting.
-  // AMPS messages can arrive continuously, so they should all
-  // be collected into the same batch.
+  // Only allow one flush timer to exist at a time.
   if (flushTimerRef.current !== null) {
     return;
   }
@@ -50,7 +50,7 @@ const scheduleFlush = useCallback(() => {
       return;
     }
 
-    // Detach the current batch immediately.
+    // Detach this batch immediately.
     // New AMPS messages can now be collected independently.
     pendingPatchesRef.current = new Map();
 
@@ -59,29 +59,21 @@ const scheduleFlush = useCallback(() => {
 
       pending.forEach((record, key) => {
         if (record === null) {
-          const updated = dropRowByKey(next, key);
-
-          // If the row isn't currently loaded, preserve the
-          // existing array reference.
-          if (updated !== next) {
-            next = updated;
-          }
-
+          next = dropRowByKey(next, key);
           return;
         }
 
-        const updated = applyRowUpdate(next, key, record);
-
-        // applyRowUpdate returns the same array when the visible
-        // row has not actually changed.
-        if (updated !== next) {
-          next = updated;
-        }
+        next = applyRowUpdate(next, key, record);
       });
 
-      // If none of the pending AMPS updates affected the currently
-      // loaded rows, this returns the exact same array reference.
-      // React can therefore bail out of the state update.
+      /*
+       * IMPORTANT:
+       *
+       * If none of the AMPS messages affected a currently
+       * loaded row, next === rows.
+       *
+       * React can therefore bail out without another render.
+       */
       return next;
     });
   }, FLUSH_THROTTLE_MS);
@@ -90,43 +82,54 @@ const scheduleFlush = useCallback(() => {
 
 ---
 
-# 2. Replace `applyRowUpdate`
+# 2. Add/replace `applyRowUpdate`
 
-Use this:
+Put this outside the component if your other helper functions are outside the component. Otherwise put it wherever your existing `applyRowUpdate` is.
 
 ```tsx
 function applyRowUpdate(
-  rows: BasketOrder[],
+  rows: MessageRow[],
   key: string,
   record: BasketOrder,
-): BasketOrder[] {
-  const index = rows.findIndex(
-    (row) => row.listId === key,
-  );
+): MessageRow[] {
+  const index = rows.findIndex((row) => row.key === key);
 
-  // This row is not currently present in the loaded window.
-  // Nothing visible needs to change.
+  /*
+   * This AMPS update is for a row that isn't currently loaded
+   * in the viewport.
+   *
+   * Do NOT create a new array.
+   */
   if (index === -1) {
     return rows;
   }
 
   const current = rows[index];
 
-  // Same object reference.
-  if (current === record) {
-    return rows;
-  }
-
-  // AMPS may create a new object containing the exact same data.
-  // Don't create a new rows array in that case.
+  /*
+   * If the visible row already contains the same values,
+   * don't create a new row object or array.
+   */
   if (areSameBasketOrder(current, record)) {
     return rows;
   }
 
-  // The row really changed.
   const next = [...rows];
 
-  next[index] = record;
+  /*
+   * Preserve MessageRow.key.
+   *
+   * Do NOT do:
+   *
+   *     next[index] = record;
+   *
+   * because BasketOrder !== MessageRow.
+   */
+  next[index] = {
+    ...current,
+    ...record,
+    key: current.key,
+  };
 
   return next;
 }
@@ -134,20 +137,19 @@ function applyRowUpdate(
 
 ---
 
-# 3. Replace `dropRowByKey`
-
-Use:
+# 3. Add/replace `dropRowByKey`
 
 ```tsx
 function dropRowByKey(
-  rows: BasketOrder[],
+  rows: MessageRow[],
   key: string,
-): BasketOrder[] {
-  const index = rows.findIndex(
-    (row) => row.listId === key,
-  );
+): MessageRow[] {
+  const index = rows.findIndex((row) => row.key === key);
 
-  // Nothing to remove from the currently loaded window.
+  /*
+   * Row isn't currently loaded.
+   * Nothing visible needs to change.
+   */
   if (index === -1) {
     return rows;
   }
@@ -162,24 +164,23 @@ function dropRowByKey(
 
 ---
 
-# 4. Add this equality helper
+# 4. Add/replace `areSameBasketOrder`
 
-Put this outside `TradingTableViewport`, preferably near the other helper functions.
+Use this version because your `MessageRow` and `BasketOrder` are different types.
 
 ```tsx
 function areSameBasketOrder(
-  current: BasketOrder,
+  current: MessageRow,
   next: BasketOrder,
 ): boolean {
-  const currentKeys = Object.keys(current) as Array<keyof BasketOrder>;
-  const nextKeys = Object.keys(next) as Array<keyof BasketOrder>;
+  const currentRecord =
+    current as unknown as Record<string, unknown>;
 
-  if (currentKeys.length !== nextKeys.length) {
-    return false;
-  }
+  const nextRecord =
+    next as unknown as Record<string, unknown>;
 
-  for (const key of currentKeys) {
-    if (!Object.is(current[key], next[key])) {
+  for (const key of Object.keys(nextRecord)) {
+    if (!Object.is(currentRecord[key], nextRecord[key])) {
       return false;
     }
   }
@@ -188,143 +189,166 @@ function areSameBasketOrder(
 }
 ```
 
-This is a **shallow comparison**. That's intentional. Don't immediately reach for `JSON.stringify`, lodash deep equality, or some other computationally expensive hammer. We're fixing a high-frequency rendering path here.
+This avoids the TypeScript error you just got.
 
 ---
 
-# 5. Change the AMPS message handling
+# 5. Keep your AMPS message handling like this
 
-From your screenshot, you have something like:
-
-```tsx
-pendingPatchesRef.current.set(key, record);
-scheduleFlush();
-```
-
-Replace that with:
+Where you currently process the AMPS message, keep the important part as:
 
 ```tsx
-const pending = pendingPatchesRef.current;
+const record: BasketOrder | undefined = message.data;
 
-const previous = pending.get(key);
-
-if (
-  previous !== undefined &&
-  previous !== null &&
-  record !== null &&
-  areSameBasketOrder(previous, record)
-) {
+if (!record) {
   return;
 }
 
-pending.set(key, record);
+const key: string | undefined =
+  message.sowKey?.() || record.listId;
 
-scheduleFlush();
-```
+if (!key) {
+  return;
+}
 
-If your existing code has:
-
-```tsx
 if (command === "oof") {
   pendingPatchesRef.current.set(key, null);
   scheduleFlush();
   return;
 }
 
+// Normal live update
+pendingPatchesRef.current.set(key, record);
+
+scheduleFlush();
+```
+
+The important thing here is:
+
+```tsx
 pendingPatchesRef.current.set(key, record);
 scheduleFlush();
 ```
 
-then use this instead:
-
-```tsx
-if (command === "oof") {
-  pendingPatchesRef.current.set(key, null);
-  scheduleFlush();
-  return;
-}
-
-const pending = pendingPatchesRef.current;
-const previous = pending.get(key);
-
-if (
-  previous !== undefined &&
-  previous !== null &&
-  record !== null &&
-  areSameBasketOrder(previous, record)
-) {
-  return;
-}
-
-pending.set(key, record);
-
-scheduleFlush();
-```
+**Do not call `setWindowRows()` directly from the AMPS callback.**
 
 ---
 
-## What this fixes
-
-Your current code effectively does this:
+# 6. Your data flow should now be exactly this
 
 ```text
-AMPS update
-      ↓
-scheduleFlush
-      ↓
-500ms
-      ↓
-setWindowRows
-      ↓
-new array
-      ↓
-RENDER
+AMPS message
+     │
+     ▼
+extract key
+     │
+     ▼
+pendingPatchesRef
+     │
+     │   multiple messages
+     │   can accumulate here
+     ▼
+scheduleFlush()
+     │
+     │ 500 ms
+     ▼
+ONE setWindowRows()
+     │
+     ▼
+for each pending update
+     │
+     ├── row not visible?
+     │       │
+     │       └── return SAME rows array
+     │
+     ├── row unchanged?
+     │       │
+     │       └── return SAME rows array
+     │
+     └── row actually changed?
+             │
+             └── create new array
+                     │
+                     ▼
+                   render
 ```
 
-even when:
+That is the behavior you want.
+
+---
+
+## One important correction
+
+**Do not remove `scheduleFlush`.**
+
+You already proved why it exists. Without it, a busy AMPS stream can cause:
 
 ```text
-AMPS says:
-
-row 123 = exactly the same data
+message 1 → setState → render
+message 2 → setState → render
+message 3 → setState → render
+message 4 → setState → render
+...
 ```
 
-The new code does:
+The problem was **not that `scheduleFlush` existed**.
 
-```text
-AMPS update
-      ↓
-pending Map
-      ↓
-scheduleFlush
-      ↓
-500ms
-      ↓
-apply update
-      ↓
-is visible data actually different?
-       ↙              ↘
-     NO                YES
-      ↓                 ↓
-same array          new array
-      ↓                 ↓
-React bailout       React render
-```
-
-### One important assumption
-
-I'm using:
+The problem was that the flush was doing:
 
 ```tsx
-row.listId === key
+setWindowRows(...)
 ```
 
-because your screenshot explicitly shows:
+and producing a new state value even when the update didn't actually require a visible change.
+
+The corrected version makes this distinction:
 
 ```tsx
-message.sowKey?.() || record.listId
+// Nothing visible changed
+return rows;
 ```
 
-If `sowKey()` can return something **different from `record.listId`**, then this lookup needs to use the actual row identifier instead. That's the one part I would verify before blindly pasting it into production, because a beautifully optimized lookup against the wrong key is still just a beautifully optimized bug.
+versus:
 
-Also, **do not remove `scheduleFlush()`**. The fix is to make its state update conditional, not to remove the batching mechanism.
+```tsx
+// Something visible actually changed
+return next;
+```
+
+That is the key fix.
+
+### Also make sure your keys line up
+
+Your initial `windowRows` must have:
+
+```tsx
+{
+  key: someStableRowIdentifier,
+  ...
+}
+```
+
+and the AMPS update must calculate the **same identifier**:
+
+```tsx
+const key = message.sowKey?.() || record.listId;
+```
+
+So this must be true:
+
+```tsx
+windowRows[index].key === key
+```
+
+If those identifiers don't match, every AMPS update will simply be treated as "not currently loaded," and the live row won't update. That's a data-key problem, not a rendering problem.
+
+Finally, keep your existing cleanup:
+
+```tsx
+if (flushTimerRef.current !== null) {
+  clearTimeout(flushTimerRef.current);
+  flushTimerRef.current = null;
+}
+```
+
+inside the component's unmount cleanup. Otherwise React will eventually get a timer callback arriving after the component has packed its bags and left the building.
