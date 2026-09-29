@@ -1,0 +1,732 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>How the Trading Table Works — Plain-English Guide</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --text: #1f2328;
+    --muted: #59636e;
+    --border: #d1d9e0;
+    --soft: #f6f8fa;
+    --accent: #0969da;
+    --good: #1a7f37;
+    --good-bg: #dafbe1;
+    --bad: #cf222e;
+    --bad-bg: #ffebe9;
+    --warn-bg: #fff8c5;
+    --note-bg: #ddf4ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  .layout { display: flex; }
+  nav {
+    position: sticky; top: 0; height: 100vh; overflow-y: auto;
+    width: 270px; flex-shrink: 0;
+    padding: 24px 16px; border-right: 1px solid var(--border); background: var(--soft);
+    font-size: 14px;
+  }
+  nav h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 8px; }
+  nav a { display: block; color: var(--text); text-decoration: none; padding: 4px 8px; border-radius: 6px; }
+  nav a:hover { background: #eaeef2; }
+  main { max-width: 980px; padding: 40px 48px 120px; }
+  h1 { font-size: 34px; line-height: 1.2; margin: 0 0 8px; }
+  h2 { font-size: 26px; margin: 56px 0 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+  h3 { font-size: 19px; margin: 32px 0 8px; }
+  p, li { color: var(--text); }
+  .lead { font-size: 18px; color: var(--muted); margin-bottom: 24px; }
+  code { font: 13.5px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--soft); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; }
+  pre { background: var(--soft); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; overflow-x: auto; }
+  pre code { border: 0; padding: 0; background: none; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0 20px; font-size: 15px; }
+  th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; vertical-align: top; }
+  th { background: var(--soft); }
+  .box { border-radius: 8px; padding: 14px 18px; margin: 16px 0; border: 1px solid var(--border); }
+  .box.note { background: var(--note-bg); border-color: #b6e3ff; }
+  .box.good { background: var(--good-bg); border-color: #aceebb; }
+  .box.bad  { background: var(--bad-bg); border-color: #ffcecb; }
+  .box.warn { background: var(--warn-bg); border-color: #f5e0a0; }
+  .box strong:first-child { display: block; margin-bottom: 4px; }
+  .diagram { border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin: 16px 0 8px; background: #fff; overflow-x: auto; }
+  .caption { font-size: 14px; color: var(--muted); margin: 0 0 20px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .card { border: 1px solid var(--border); border-radius: 8px; padding: 14px 18px; }
+  .card h4 { margin: 0 0 6px; font-size: 16px; }
+  .pill { display: inline-block; font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 999px; margin-left: 6px; vertical-align: middle; }
+  .pill.new { background: var(--good-bg); color: var(--good); }
+  .pill.mod { background: var(--note-bg); color: var(--accent); }
+  .pill.del { background: var(--bad-bg); color: var(--bad); }
+  .mermaid-fallback { display: none; font-size: 14px; color: var(--bad); }
+  @media (max-width: 900px) { nav { display: none; } main { padding: 24px; } .grid2 { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="layout">
+<nav>
+  <h2>Contents</h2>
+  <a href="#dev-vs-prod">0. Why dev uses more CPU than prod</a>
+  <a href="#big-picture">1. The big picture</a>
+  <a href="#problems">2. What was wrong before</a>
+  <a href="#files">3. What each file does</a>
+  <a href="#virtualization">4. How virtualization works</a>
+  <a href="#server-window">5. The server window (paging)</a>
+  <a href="#data-flow">6. How data flows end to end</a>
+  <a href="#initial-load">7. Example: first page load</a>
+  <a href="#scrolling">8. Example: scrolling</a>
+  <a href="#live-updates">9. Example: a live price update</a>
+  <a href="#flush">10. The flush (batching updates)</a>
+  <a href="#rendering">11. Rendering only what changed</a>
+  <a href="#sort-filter">12. Example: sorting and filtering</a>
+  <a href="#connection">13. Connecting and disconnecting</a>
+  <a href="#knobs">14. The numbers you can tune</a>
+  <a href="#limits">15. Known limits and next steps</a>
+  <a href="#glossary">16. Glossary</a>
+</nav>
+
+<main>
+<h1>How the Trading Table Works</h1>
+<p class="lead">A plain-English guide to the live Basket Orders table: what each file does, how scrolling through a huge list stays fast, and what happens when a price changes on the server.</p>
+
+<div class="box note">
+  <strong>Who this is for</strong>
+  Anyone on the team, including people who don't write React every day. Technical words are explained the first time they appear and again in the <a href="#glossary">glossary</a> at the end.
+</div>
+
+<!-- ============================================================ -->
+<h2 id="dev-vs-prod">0. Why the development build uses so much more CPU than production</h2>
+
+<div class="box good">
+  <strong>Short answer</strong>
+  <code>npm run dev</code> runs a version of React built for <em>finding bugs</em>. It deliberately renders everything twice, runs extra checks on every render, and records extra debugging information. <code>npm run build</code> + <code>npm run preview</code> runs the version built for <em>speed</em>, with all of that removed. It's the same app code, but a very different amount of work per update.
+</div>
+
+<p>An analogy: the development build is a car on a test track with sensors on every part and an engineer writing notes after every lap. The production build is the same car with the sensors taken off. Both drive the same route, but one carries far more overhead.</p>
+
+<h3>What the development build does extra, on every update</h3>
+<table>
+  <tr><th>Extra work in development</th><th>What it means in plain terms</th><th>Cost for our live table</th></tr>
+  <tr>
+    <td><strong>StrictMode double rendering</strong><br/>(<code>&lt;StrictMode&gt;</code> in <code>main.tsx</code>)</td>
+    <td>React runs every component's render function <em>twice</em> and throws the second result away. This catches code that behaves differently when run twice. It only happens in development.</td>
+    <td>Every flush (up to 4 per second) renders the table and every changed row twice, doubling the rendering work.</td>
+  </tr>
+  <tr>
+    <td><strong>Development build of React</strong></td>
+    <td>React ships two versions of itself. The development version checks things as it goes: missing <code>key</code>s, wrong hook order, invalid props, and it tracks which component created which, so error messages can point at the right line.</td>
+    <td>Every one of the thousands of cells rendered pays for these checks.</td>
+  </tr>
+  <tr>
+    <td><strong>Performance-timeline logging</strong></td>
+    <td>React 19's development build writes timing entries for component renders so that they show up in Chrome's Performance panel.</td>
+    <td>Extra bookkeeping on every render. It's useful for debugging, but it isn't free.</td>
+  </tr>
+  <tr>
+    <td><strong>Unoptimized code</strong></td>
+    <td>The dev server serves code as-is: not minified, not bundled, and with development-only branches left in. Production removes every <code>if (development) { … }</code> block entirely.</td>
+    <td>Slower page start-up, and more code runs on every update.</td>
+  </tr>
+  <tr>
+    <td><strong>Dev tooling</strong></td>
+    <td>Vite's hot-reload connection, source maps, and (if installed) the React DevTools extension, which inspects every render.</td>
+    <td>Small but constant background work, and more with DevTools open.</td>
+  </tr>
+</table>
+
+<div class="diagram"><pre class="mermaid">
+flowchart LR
+  subgraph dev["npm run dev (development)"]
+    direction TB
+    d1["Live update arrives"] --> d2["Render table: pass 1<br/>+ dev checks + timing logs"]
+    d2 --> d3["Render table: pass 2 (StrictMode)<br/>+ dev checks + timing logs"]
+    d3 --> d4["Update the screen"]
+  end
+  subgraph prod["npm run preview (production)"]
+    direction TB
+    p1["Live update arrives"] --> p2["Render table: one pass<br/>optimized, no checks"]
+    p2 --> p4["Update the screen"]
+  end
+</pre></div>
+<p class="caption">The same update. In development React does roughly double the rendering plus extra checks. In production it does one lean pass.</p>
+
+<h3>Why this matters so much for <em>this</em> app</h3>
+<p>Most web pages render once and then sit idle, so the development overhead is barely noticeable. A live trading table is the opposite: it re-renders up to <strong>4 times a second, forever</strong>, across dozens of columns. Any per-render overhead gets multiplied by the number of renders, so a fixed extra cost per render becomes a constant CPU load in development.</p>
+
+<h3>What this means in practice</h3>
+<ul>
+  <li><strong>Judge performance only on the production build.</strong> Run <code>npm run build</code>, then <code>npm run preview</code> (port 4173). Close DevTools and read the tab's CPU in Chrome's Task Manager (Shift+Esc). Rebuild after every code change: the preview server doesn't hot-reload.</li>
+  <li><strong>Use the development build for writing and debugging code,</strong> not for measuring speed. High CPU in <code>npm run dev</code> is expected and doesn't mean users will see it.</li>
+  <li><strong>Don't remove <code>&lt;StrictMode&gt;</code> to "fix" development CPU.</strong> It has no effect in production, and it's what helped us find the WebSocket bug (<a href="#connection">section 13</a>).</li>
+  <li><strong><code>console.log</code> costs CPU in both builds,</strong> especially with DevTools open. Remove debugging logs, such as a log inside the table's render, before measuring.</li>
+</ul>
+
+<div class="box note">
+  <strong>Result on this project</strong>
+  After these changes, the production build (<code>npm run preview</code>) showed low CPU usage while the table was live. The development server still showed high CPU. That's the expected gap described above, not a problem in the table itself.
+</div>
+
+<!-- ============================================================ -->
+<h2 id="big-picture">1. The big picture</h2>
+
+<p>The page shows a table of basket orders that come from an <strong>AMPS</strong> server (a real-time messaging database). There can be thousands of orders, and prices change many times a second.</p>
+
+<p>Showing all of them at once would be like printing an entire phone book every time one phone number changes. So the app does three things instead:</p>
+
+<ol>
+  <li><strong>Only ask the server for the rows near what you're looking at.</strong> Roughly 50–70 rows at a time, not the whole list. This is the <em>server window</em>.</li>
+  <li><strong>Only draw the rows that fit on screen.</strong> Even of those ~70 rows, only the ~20–30 you can actually see (plus a few spare) are drawn. This is <em>virtualization</em>.</li>
+  <li><strong>Collect price changes and apply them in batches.</strong> At most 4 times a second, and only redraw the rows whose values actually changed. This is the <em>flush</em>.</li>
+</ol>
+
+<div class="box good">
+  <strong>An everyday analogy</strong>
+  Think of a train window. The landscape (all the orders) is huge, but you only ever see what's in the window. The app is the train crew: it fetches the scenery just ahead of the window before you get there, and only repaints the bits of scenery that changed.
+</div>
+
+<div class="diagram"><pre class="mermaid">
+flowchart LR
+  A[("AMPS server<br/>all orders<br/>e.g. 10,000 rows")] -->|"asks for rows 0-50 only"| B["Browser memory<br/>~51-71 rows<br/>(the server window)"]
+  B -->|"draws only visible rows"| C["Screen<br/>~20-30 rows<br/>(virtualization)"]
+  A -.->|"live price changes"| D["Update buffer<br/>(collects changes)"]
+  D -->|"every 250 ms at most"| B
+</pre></div>
+<p class="caption">Three layers: the full data lives on the server, a small slice lives in the browser, and an even smaller slice is drawn on screen.</p>
+
+<!-- ============================================================ -->
+<h2 id="problems">2. What was wrong before</h2>
+
+<p>The previous version worked, but it had several problems that made it slow and confusing:</p>
+
+<table>
+  <tr><th>Problem</th><th>What the user saw</th><th>What we changed</th></tr>
+  <tr>
+    <td>The table was told the total row count, but the value was silently ignored (hidden behind an <code>as any</code> type cast).</td>
+    <td>The scrollbar only covered ~51 rows. Scrolling near the bottom made the content jump, and you could never smoothly reach rows further down.</td>
+    <td>The table now accepts <code>rowCount</code> and <code>rowOffset</code> properly, so the scrollbar represents the full server total.</td>
+  </tr>
+  <tr>
+    <td>Every scroll event redrew the <em>whole</em> table immediately (the virtualizer's default "flushSync" mode).</td>
+    <td>Console warning: <em>"'scroll' handler took Xms"</em>. Janky scrolling.</td>
+    <td>Turned that off (<code>useFlushSync: false</code>) and made rows remember themselves (memoization).</td>
+  </tr>
+  <tr>
+    <td>Every update redrew every visible cell and the whole header.</td>
+    <td>Console warning: <em>"'message' handler took 468ms"</em>. High CPU.</td>
+    <td>Rows and the header are now memoized: only changed rows redraw.</td>
+  </tr>
+  <tr>
+    <td>The flush copied the whole row list once <em>per change</em>, and redrew even when nothing had changed.</td>
+    <td>Wasted CPU on every update.</td>
+    <td>One copy per batch, and unchanged values are skipped.</td>
+  </tr>
+  <tr>
+    <td>Number formatting created a new formatter for every single cell.</td>
+    <td>Slow rendering with ~25 numeric columns.</td>
+    <td>One cached formatter per number of decimal places.</td>
+  </tr>
+  <tr>
+    <td>In development, React mounts components twice (StrictMode), and the first socket was closed while still connecting.</td>
+    <td>Console warning: <em>"WebSocket is closed before the connection is established"</em>.</td>
+    <td>The connection starts one moment later, so only the surviving mount ever opens a socket.</td>
+  </tr>
+  <tr>
+    <td>Row heights were estimated at 50px, but rows were really about 45px.</td>
+    <td>Scroll position drifted slightly.</td>
+    <td>Every row is now exactly 45px.</td>
+  </tr>
+  <tr>
+    <td>The header's scroll wrapper was the wrong element.</td>
+    <td>The header scrolled away, and the sideways scrollbar sat below every row, at the very bottom of the list.</td>
+    <td>The table sits directly in the scroll box, so the header stays pinned and sideways scrolling works normally.</td>
+  </tr>
+  <tr>
+    <td>If you scrolled quickly, an older subscription could be left running.</td>
+    <td>Extra hidden network traffic.</td>
+    <td>Every subscription that's no longer needed is now always cancelled.</td>
+  </tr>
+</table>
+
+<!-- ============================================================ -->
+<h2 id="files">3. What each file does</h2>
+
+<div class="diagram"><pre class="mermaid">
+flowchart TD
+  main["main.tsx<br/>starts React"] --> app["App.tsx<br/>shows the dashboard"]
+  app --> view["TradingTableViewport.tsx<br/>the page: title, status badge, table, footer"]
+  view --> hook["hooks/useAmpsViewport.ts<br/>talks to AMPS, keeps the data"]
+  view --> dt["ui/data-table.tsx<br/>draws the table (TanStack Table + Virtual)"]
+  view --> cols["tradingColumns.tsx<br/>which columns exist and how to format them"]
+  view --> status["connectionStatus.ts<br/>badge colours and labels"]
+  hook --> amps[("amps library<br/>WebSocket client")]
+  hook --> cols
+  dt --> ui["ui/table, checkbox, input, button<br/>shadcn building blocks"]
+</pre></div>
+<p class="caption">Who uses whom. Arrows point from a file to the files it relies on.</p>
+
+<div class="grid2">
+  <div class="card">
+    <h4><code>src/hooks/useAmpsViewport.ts</code> <span class="pill new">new</span></h4>
+    <p><strong>The brain.</strong> Connects to AMPS, asks for the right slice of rows, listens for live changes, batches them, and keeps the total row count. It knows nothing about how things look.</p>
+  </div>
+  <div class="card">
+    <h4><code>src/components/ui/data-table.tsx</code> <span class="pill mod">changed</span></h4>
+    <p><strong>The painter.</strong> A reusable table built on TanStack Table (rows, columns, sorting and filtering state) and TanStack Virtual (only draws what's visible). It shows grey "skeleton" rows for positions that haven't loaded yet.</p>
+  </div>
+  <div class="card">
+    <h4><code>src/components/TradingTableViewport.tsx</code> <span class="pill mod">changed</span></h4>
+    <p><strong>The page.</strong> About 100 lines of layout. It calls the hook, passes the results to the table, and shows the title, the connection badge and the footer.</p>
+  </div>
+  <div class="card">
+    <h4><code>src/components/tradingColumns.tsx</code> <span class="pill mod">changed</span></h4>
+    <p><strong>The column list.</strong> Defines every column (Desk ID, $ Ord, % Exec, …) and how to display each value as currency, a percentage or a number. Number formatters are now cached.</p>
+  </div>
+  <div class="card">
+    <h4><code>src/components/connectionStatus.ts</code> <span class="pill mod">comment only</span></h4>
+    <p>Maps "connecting / connected / failed" to a badge colour and label.</p>
+  </div>
+  <div class="card">
+    <h4><code>TradingTable.tsx</code>, <code>TradingTablemock.tsx</code> <span class="pill del">deleted</span></h4>
+    <p>Two older experiments that the app no longer used.</p>
+  </div>
+</div>
+
+<p>Unchanged: <code>App.tsx</code>, <code>main.tsx</code>, <code>index.css</code>, <code>App.css</code>, the other <code>ui/</code> components, and all config files. No libraries were added.</p>
+
+<!-- ============================================================ -->
+<h2 id="virtualization">4. How virtualization works (TanStack Virtual)</h2>
+
+<p>Imagine a list of 10,000 rows, each 45 pixels tall. That's 450,000 pixels of content, but your screen only shows about 20 rows. Drawing all 10,000 rows would take a lot of memory and time.</p>
+
+<p><strong>Virtualization</strong> fakes it. The browser is given a scroll area of the full height, but only the rows you can see are real. Above and below them are two invisible "spacer" rows that take up the rest of the height, so the scrollbar looks and behaves exactly as if everything were there.</p>
+
+<div class="diagram"><pre class="mermaid">
+flowchart TB
+  subgraph sb["Scroll box: what the browser thinks it has"]
+    direction TB
+    top["Top spacer row<br/>empty, height = rows above x 45px<br/>e.g. 4,000 rows x 45 = 180,000 px"]
+    r1["Row 4,000 (drawn)"]
+    r2["Row 4,001 (drawn)"]
+    r3["... about 20-30 drawn rows ..."]
+    r4["Row 4,030 (drawn)"]
+    bottom["Bottom spacer row<br/>empty, height = rows below x 45px"]
+    top --> r1 --> r2 --> r3 --> r4 --> bottom
+  end
+</pre></div>
+<p class="caption">Only the middle part is real. The spacers are empty cells with a fixed height.</p>
+
+<h3>The steps, every time you scroll</h3>
+<ol>
+  <li>The browser reports how far down you've scrolled, for example 180,000px.</li>
+  <li>The virtualizer divides by the row height: 180,000 ÷ 45 = row <strong>4,000</strong> is at the top.</li>
+  <li>It works out how many rows fit on screen, then adds <strong>10 extra ("overscan")</strong> above and below so fast scrolling doesn't show blank gaps.</li>
+  <li>It returns that list of row numbers. The table draws just those, plus the two spacers.</li>
+</ol>
+
+<div class="diagram"><pre class="mermaid">
+flowchart LR
+  s["You scroll"] --> o["Browser: scrollTop = 180,000px"]
+  o --> v["Virtualizer:<br/>180,000 / 45 = row 4,000"]
+  v --> r["Visible rows 4,000-4,020<br/>+ 10 overscan each side"]
+  r --> d["Table draws rows 3,990-4,030<br/>plus top and bottom spacers"]
+</pre></div>
+
+<div class="box note">
+  <strong>Why a fixed row height matters</strong>
+  The simple division above only works if every row is the same height. That's why every row is now exactly 45px (<code>rowHeight</code> in <code>DataTable</code>). If rows were different heights, the virtualizer would have to measure each one, which costs time.
+</div>
+
+<h3>TanStack Table vs TanStack Virtual</h3>
+<table>
+  <tr><th></th><th>TanStack Table</th><th>TanStack Virtual</th></tr>
+  <tr><td>Job</td><td>Knows the rows, the columns, sorting, filters and selected checkboxes.</td><td>Knows which row <em>numbers</em> are on screen.</td></tr>
+  <tr><td>Draws anything?</td><td>No. It gives us data to draw ("headless").</td><td>No. It gives us numbers and pixel positions.</td></tr>
+  <tr><td>In our code</td><td><code>useReactTable(...)</code> in <code>data-table.tsx</code></td><td><code>useVirtualizer(...)</code> in <code>data-table.tsx</code></td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2 id="server-window">5. The server window (paging with AMPS)</h2>
+
+<p>Virtualization saves <em>drawing</em>. But we also don't want to <em>download</em> all 10,000 rows. So we ask AMPS for just a slice, using two options:</p>
+<ul>
+  <li><code>skip_n</code>: how many rows to skip from the top.</li>
+  <li><code>top_n</code>: how many rows to return.</li>
+</ul>
+<p>For example, <code>skip_n=3975, top_n=71</code> means "give me rows 3,975 to 4,045 in the current sort order". That's the visible rows plus <strong>25 spare rows on each side</strong> (<code>VIEWPORT_BUFFER</code>).</p>
+
+<p>The table is told three things:</p>
+<table>
+  <tr><th>Setting</th><th>Meaning</th><th>Example</th></tr>
+  <tr><td><code>rowCount</code></td><td>How many rows exist on the server. This sizes the scrollbar.</td><td>10,000</td></tr>
+  <tr><td><code>rowOffset</code></td><td>Which row number the loaded slice starts at.</td><td>3,975</td></tr>
+  <tr><td><code>data</code></td><td>The loaded rows themselves.</td><td>71 rows</td></tr>
+</table>
+
+<p>When the virtualizer asks for row number 4,000, the table looks up <code>data[4000 - 3975]</code>, which is <code>data[25]</code>. If that position isn't loaded (for example, you just scrolled somewhere new), a grey <strong>skeleton row</strong> is shown until the data arrives.</p>
+
+<div class="diagram"><pre class="mermaid">
+flowchart LR
+  q{"Virtualizer wants<br/>row N"} --> c{"Is N between<br/>rowOffset and<br/>rowOffset + data.length - 1?"}
+  c -->|Yes| real["Draw real row<br/>data[N - rowOffset]"]
+  c -->|No| sk["Draw grey skeleton row<br/>(loading)"]
+</pre></div>
+
+<!-- ============================================================ -->
+<h2 id="data-flow">6. How data flows end to end</h2>
+
+<div class="diagram"><pre class="mermaid">
+flowchart TD
+  subgraph srv["AMPS server"]
+    S1["Window subscription<br/>sow_and_subscribe<br/>skip_n / top_n / orderBy / filter"]
+    S2["Count subscription<br/>COUNT(1) aggregate"]
+  end
+
+  subgraph hk["useAmpsViewport hook: the brain"]
+    H1["Message handler<br/>runs for every message"]
+    H2["Pending changes buffer<br/>(a Map: row key -> new values)"]
+    H3["Flush<br/>at most every 250 ms,<br/>inside an animation frame"]
+    W["Loaded window<br/>start + rows + key index"]
+  end
+
+  subgraph rs["React state"]
+    R1["windowRows"]
+    R2["windowStart"]
+    R3["totalRowCount"]
+  end
+
+  subgraph tb["DataTable: the painter"]
+    T1["TanStack Table<br/>row model"]
+    T2["TanStack Virtual<br/>which rows are visible"]
+    T3["Memoized rows<br/>only changed rows redraw"]
+  end
+
+  S1 --> H1
+  S2 --> H1
+  H1 -->|"row is on screen"| H2
+  H1 -.->|"row not loaded: ignore"| X["dropped"]
+  H2 --> H3 --> W
+  W --> R1 & R2
+  H3 --> R3
+  R1 & R2 & R3 --> T1 --> T2 --> T3
+  T2 -->|"visible range changed"| RC["handleRangeChange<br/>(waits 150 ms)"]
+  RC -->|"need rows we don't have"| S1
+</pre></div>
+<p class="caption">The loop: the server sends data, the hook batches it, React state changes, the table redraws only what's needed, and scrolling tells the hook which rows to fetch next.</p>
+
+<!-- ============================================================ -->
+<h2 id="initial-load">7. Example: first page load</h2>
+
+<div class="diagram"><pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant U as User
+  participant P as Page (TradingTableViewport)
+  participant H as Hook (useAmpsViewport)
+  participant A as AMPS server
+  participant T as Table (DataTable)
+
+  U->>P: opens the page
+  P->>H: start
+  H->>A: connect (WebSocket)
+  A-->>H: connected
+  H->>P: status = "connected" (green badge)
+  H->>A: fetch rows 0-50 (skip_n=0, top_n=51)
+  H->>A: subscribe to the total row count
+  A-->>H: 51 "sow" rows, one at a time
+  A-->>H: group_end (that's all)
+  H->>P: windowRows = 51 rows, windowStart = 0
+  P->>T: draw
+  T-->>U: rows appear
+  A-->>H: total = 10,000
+  H->>P: totalRowCount = 10,000
+  T-->>U: scrollbar now covers 10,000 rows
+</pre></div>
+
+<p>Two console lines tell you how fast this was:</p>
+<pre><code>[perf] initial fetch latency = 85.3ms (skip_n=0, top_n=51, rows=51)
+[perf] TTFR (Time To First Row) = 412.7ms (51 rows)</code></pre>
+<p><strong>TTFR</strong> is the time from the page appearing to the first real row being loaded.</p>
+
+<!-- ============================================================ -->
+<h2 id="scrolling">8. Example: scrolling down</h2>
+
+<p>Say rows 0–50 are loaded and you scroll down so that rows 35–55 are on screen.</p>
+
+<ol>
+  <li>The virtualizer tells the hook "rows 25–65 are drawn" (visible rows plus overscan).</li>
+  <li>The hook <strong>waits 150ms</strong> (<code>RANGE_DEBOUNCE_MS</code>). If you're still scrolling, the timer restarts. We don't want to hit the server for every pixel of movement.</li>
+  <li>When you pause, it checks: do we have rows 15–75? (That's the drawn range plus a 10-row prefetch margin, <code>PREFETCH_THRESHOLD</code>.) We only have 0–50, so no.</li>
+  <li>It fetches rows 0–90 (25 spare rows on each side), then cancels the old subscription.</li>
+  <li>While that loads, rows we don't have show as grey skeletons. When the new rows arrive, they replace the old slice.</li>
+</ol>
+
+<div class="diagram"><pre class="mermaid">
+flowchart TD
+  a["You scroll"] --> b["Virtualizer: drawn rows changed"]
+  b --> c["handleRangeChange<br/>remember range, restart 150 ms timer"]
+  c --> d{"Still scrolling?"}
+  d -->|"yes: timer restarts"| c
+  d -->|"no: 150 ms passed"| e["checkRange"]
+  e --> f{"Loaded rows cover<br/>drawn range +/- 10?"}
+  f -->|Yes| g["Do nothing"]
+  f -->|No| h["fetchRange<br/>drawn range +/- 25"]
+  h --> i["Cancel old subscription<br/>start new one"]
+  i --> j["Rows arrive<br/>skeletons replaced"]
+</pre></div>
+
+<div class="box note">
+  <strong>What "generation" means</strong>
+  Each fetch gets a ticket number (<code>generationRef</code>). If you scroll again before an older fetch finishes, messages from the older fetch carry an out-of-date ticket and are ignored. Its subscription is cancelled as soon as it starts. This prevents old rows from appearing in the wrong place.
+</div>
+
+<!-- ============================================================ -->
+<h2 id="live-updates">9. Example: a live price update</h2>
+
+<p>Suppose basket <code>L42</code> fills a bit more and <code>$ Exec</code> changes on the server. Here's what happens to that one message:</p>
+
+<div class="diagram"><pre class="mermaid">
+flowchart TD
+  m["Message arrives from AMPS<br/>row L42, usdExec = 1,250,000"] --> g{"From the current<br/>fetch (generation)?"}
+  g -->|No| drop1["Ignore"]
+  g -->|Yes| k{"What kind?"}
+  k -->|"sow (initial row)"| batch["Add to the incoming page"]
+  k -->|"group_end"| commit["Page complete:<br/>show it"]
+  k -->|"p (update) or oof (removed)"| l{"Page finished loading?"}
+  l -->|"No"| early["Keep in early-changes list<br/>apply when page completes"]
+  l -->|"Yes"| w{"Is L42 in the<br/>loaded rows?"}
+  w -->|No| drop2["Ignore<br/>(not on screen)"]
+  w -->|Yes| buf["Put in pending-changes buffer<br/>(merges with earlier changes to L42)"]
+  buf --> sch["Schedule a flush"]
+</pre></div>
+
+<p>"<strong>oof</strong>" (out of focus) is AMPS's way of saying "this row no longer matches your query", for example because it was deleted or no longer matches your filter. We remove that row.</p>
+
+<!-- ============================================================ -->
+<h2 id="flush">10. The flush: applying changes in batches</h2>
+
+<p>If a price ticks 20 times a second, we don't want to redraw 20 times a second. The eye can't tell, and the CPU pays for it. So changes wait in a buffer, and a <strong>flush</strong> applies them all together.</p>
+
+<h3>When does a flush happen?</h3>
+<ul>
+  <li><strong>At most once every 250ms</strong> (<code>FLUSH_INTERVAL_MS</code>). That's 4 times a second, matching the server's own 250ms <em>conflation</em> (AMPS merging rapid changes to the same row).</li>
+  <li><strong>Inside an animation frame</strong> (<code>requestAnimationFrame</code>). That's the moment the browser is about to repaint the screen. It also means that if the browser tab is hidden, flushes pause automatically and cost nothing.</li>
+</ul>
+
+<div class="diagram"><pre class="mermaid">
+sequenceDiagram
+  participant M as Messages
+  participant B as Buffer
+  participant F as Flush
+  participant R as React / screen
+
+  M->>B: L42 changed (t = 0 ms)
+  Note over B,F: first change, flush scheduled for t = 250 ms
+  M->>B: L17 changed (t = 40 ms)
+  M->>B: L42 changed again (t = 90 ms), merged
+  M->>B: L08 changed (t = 200 ms)
+  F->>B: t = 250 ms, next animation frame: take everything
+  F->>F: apply 3 rows in ONE pass, skip any that did not really change
+  F->>R: one state update, one redraw of 3 rows
+</pre></div>
+
+<h3>What the flush does, step by step</h3>
+<ol>
+  <li>Takes everything from the buffer and empties it.</li>
+  <li>If the total row count changed, updates it.</li>
+  <li>For each changed row, looks up its position using a key index (a Map, so it's instant).</li>
+  <li>Compares the new values with the old ones. <strong>If nothing actually changed, it skips that row</strong>, so the row keeps its identity and won't redraw.</li>
+  <li>Copies the row list <strong>once</strong>, puts the updated rows in, and removes any "oof" rows.</li>
+  <li>Hands the finished list to React in one go.</li>
+</ol>
+
+<div class="grid2">
+  <div class="box bad"><strong>Before</strong>A timer every 500ms. For each change it searched the whole list and copied it, so 10 changes meant 10 full copies. Rows were redrawn even when the value was identical.</div>
+  <div class="box good"><strong>After</strong>A timer plus animation frame every 250ms. One copy per batch, unchanged rows skipped, paused when the tab is hidden, and the row count is included in the same batch.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="rendering">11. Rendering only what changed (memoization)</h2>
+
+<p><strong>Memoization</strong> means a component remembers what it drew last time and skips redrawing if its inputs are the same.</p>
+
+<p>Each row is a <code>DataTableRow</code> component that only redraws when one of these changes:</p>
+<ul>
+  <li>its data object (the flush creates a new object only for rows that really changed),</li>
+  <li>whether it's selected (checkbox),</li>
+  <li>which columns are shown,</li>
+  <li>the row height.</li>
+</ul>
+<p>The header (<code>DataTableHeader</code>) only redraws when sorting, filters or the select-all checkbox change. It doesn't redraw on price ticks.</p>
+
+<div class="diagram"><pre class="mermaid">
+flowchart LR
+  f["Flush: rows L42, L17, L08 changed"] --> dt["DataTable function runs<br/>(cheap: ~51 rows of bookkeeping)"]
+  dt --> h["Header: same sorting and filters<br/>SKIPPED"]
+  dt --> r1["Row L01: same data<br/>SKIPPED"]
+  dt --> r2["Row L08: new data<br/>REDRAWN"]
+  dt --> r3["Row L17: new data<br/>REDRAWN"]
+  dt --> r4["Row L42: new data<br/>REDRAWN"]
+  dt --> r5["... other rows<br/>SKIPPED"]
+</pre></div>
+
+<div class="box note">
+  <strong>Measured in a test with fake data</strong>
+  With 3 of 30 visible rows ticking 4 times a second, about 60 cell renders happened in 2 seconds, compared with about 480 without memoization. Scrolling for 3 seconds produced no long tasks: the median frame took 8.3ms (the headless test browser ran at 120Hz). If you put a <code>console.log</code> inside <code>DataTable</code>, it will still print on every flush. That's expected: the function runs, but the rows underneath skip their work.
+</div>
+
+<!-- ============================================================ -->
+<h2 id="sort-filter">12. Example: sorting and filtering</h2>
+
+<p>We only have ~70 of possibly thousands of rows, so sorting or filtering <em>in the browser</em> would give wrong answers. Instead, the server sorts and filters:</p>
+
+<table>
+  <tr><th>You do</th><th>The hook sends to AMPS</th></tr>
+  <tr><td>Click "$ Ord" header (descending)</td><td><code>orderBy = /usdOrd desc</code></td></tr>
+  <tr><td>Type "BUY" in a filter box</td><td><code>filter = /basketSide LIKE '(?i).*BUY.*'</code> (case-insensitive "contains")</td></tr>
+  <tr><td>No sort chosen</td><td><code>orderBy = /transactTime desc</code> (newest first)</td></tr>
+</table>
+
+<div class="diagram"><pre class="mermaid">
+sequenceDiagram
+  participant U as User
+  participant T as Table
+  participant H as Hook
+  participant A as AMPS
+
+  U->>T: types "BUY" in a filter box
+  T->>H: filters changed
+  Note over H: wait 150 ms (you may still be typing)
+  H->>H: clear loaded rows, total = 0
+  H->>T: scroll back to the top
+  H->>A: fetch rows 0-50 with the new filter
+  H->>A: re-subscribe the row count with the new filter
+  A-->>H: matching rows + new total
+  H->>T: draw
+</pre></div>
+
+<p>Sorting works the same way, except that it doesn't need the 150ms wait and keeps the current total (sorting doesn't change how many rows there are).</p>
+
+<!-- ============================================================ -->
+<h2 id="connection">13. Connecting and disconnecting</h2>
+
+<p>In development, React deliberately mounts every component, unmounts it, and mounts it again (<strong>StrictMode</strong>). This helps catch bugs. Before, that meant a WebSocket was opened, then closed while still connecting, which triggered the browser warning.</p>
+
+<p>Now the hook waits one "microtask" (a tiny moment) before connecting. React's mount–unmount–mount happens before that moment, so only the final mount ever connects.</p>
+
+<div class="diagram"><pre class="mermaid">
+sequenceDiagram
+  participant R as React (dev StrictMode)
+  participant H as Hook
+  participant A as AMPS
+
+  R->>H: mount 1: schedule connect
+  R->>H: unmount 1: cancelled = true
+  R->>H: mount 2: schedule connect
+  Note over H: microtask runs
+  H--xA: mount 1: cancelled, does nothing
+  H->>A: mount 2: connect
+  A-->>H: connected
+  Note over H,A: When the page closes:<br/>only a connected client is disconnected.<br/>A socket still connecting is closed once it finishes.
+</pre></div>
+
+<!-- ============================================================ -->
+<h2 id="knobs">14. The numbers you can tune</h2>
+
+<table>
+  <tr><th>Name</th><th>Where</th><th>Value</th><th>What it controls</th></tr>
+  <tr><td><code>VIEWPORT_BUFFER</code></td><td>useAmpsViewport.ts</td><td>25</td><td>Spare rows fetched above and below what's drawn.</td></tr>
+  <tr><td><code>PREFETCH_THRESHOLD</code></td><td>useAmpsViewport.ts</td><td>10</td><td>How close to the edge of the loaded rows you can get before the next fetch starts.</td></tr>
+  <tr><td><code>RANGE_DEBOUNCE_MS</code></td><td>useAmpsViewport.ts</td><td>150</td><td>How long scrolling or typing must pause before we ask the server.</td></tr>
+  <tr><td><code>CONFLATION_MS</code></td><td>useAmpsViewport.ts</td><td>250</td><td>AMPS merges changes to the same row within this window.</td></tr>
+  <tr><td><code>FLUSH_INTERVAL_MS</code></td><td>useAmpsViewport.ts</td><td>250</td><td>At most one screen update per this many milliseconds.</td></tr>
+  <tr><td><code>DEFAULT_ORDER_BY</code></td><td>useAmpsViewport.ts</td><td>/transactTime desc</td><td>Sort order when no column is sorted.</td></tr>
+  <tr><td><code>rowHeight</code></td><td>DataTable prop</td><td>45</td><td>Exact pixel height of every row.</td></tr>
+  <tr><td><code>overscan</code></td><td>DataTable prop</td><td>10</td><td>Extra rows drawn off-screen above and below.</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2 id="limits">15. Known limits and next steps</h2>
+
+<div class="box warn">
+  <strong>The subscription may still receive updates for the whole topic</strong>
+  <code>skip_n</code>/<code>top_n</code> limit the first snapshot. We're assuming AMPS may still send live updates for <em>every</em> row in the topic. We drop the ones we don't need immediately, but the AMPS library still has to read (parse) each message first. If CPU stays high while idle, this is the most likely cause.
+  <br/><br/>
+  <strong>Proposed fix:</strong> after loading a page, subscribe only to those rows' keys (<code>/listID IN (...)</code>). This needs confirmation that <code>listID</code> is unique per row.
+</div>
+
+<div class="box warn">
+  <strong>New rows don't appear on their own</strong>
+  If a brand-new order would sort into the rows you're looking at, it shows up on the next fetch (scroll, sort or filter), not instantly. The earlier version had the same limitation.
+</div>
+
+<div class="box warn">
+  <strong>"Select all" means "select all loaded rows"</strong>
+  Only rows currently in the browser can be selected at once.
+</div>
+
+<div class="box note">
+  <strong>How to measure CPU fairly</strong>
+  Run <code>npm run build</code> then <code>npm run preview</code> (it opens on port 4173). Close DevTools and check the tab in Chrome's Task Manager (Shift+Esc). The development server is several times slower and renders everything twice.
+</div>
+
+<div class="box note">
+  <strong>Dark mode</strong>
+  The shadcn dark colours in <code>index.css</code> only apply when the <code>dark</code> class is on the page, and nothing currently adds it. Leftover Vite starter styles in <code>index.css</code> also change some colours when your OS is in dark mode, which looks half-finished. We still need to decide how dark mode should switch: follow the OS setting, or use a toggle button.
+</div>
+
+<!-- ============================================================ -->
+<h2 id="glossary">16. Glossary</h2>
+
+<table>
+  <tr><th>Term</th><th>Plain meaning</th></tr>
+  <tr><td>AMPS</td><td>The real-time server that holds the orders and pushes changes to us.</td></tr>
+  <tr><td>SOW (State of the World)</td><td>AMPS's current copy of every record in a topic.</td></tr>
+  <tr><td>sow_and_subscribe</td><td>"Send me the current rows, then keep sending me changes."</td></tr>
+  <tr><td>skip_n / top_n</td><td>"Skip this many rows, then give me this many." That's how we page.</td></tr>
+  <tr><td>oof (out of focus)</td><td>"This row no longer matches your query." We remove it.</td></tr>
+  <tr><td>Conflation</td><td>The server merges several quick changes to the same row into one.</td></tr>
+  <tr><td>group_end</td><td>AMPS's signal that the initial batch of rows is complete.</td></tr>
+  <tr><td>TanStack Table</td><td>A library that manages table data (rows, columns, sort, filter, selection) without drawing anything itself.</td></tr>
+  <tr><td>TanStack Virtual</td><td>A library that works out which rows are on screen, so only those are drawn.</td></tr>
+  <tr><td>Virtualization</td><td>Drawing only the visible part of a long list, with empty spacers for the rest.</td></tr>
+  <tr><td>Overscan</td><td>A few extra rows drawn just off-screen so fast scrolling doesn't show blanks.</td></tr>
+  <tr><td>Skeleton row</td><td>A grey placeholder shown while a row's data is still loading.</td></tr>
+  <tr><td>Flush</td><td>Applying all buffered changes to the screen at once.</td></tr>
+  <tr><td>Debounce</td><td>Waiting until activity stops for a moment before acting.</td></tr>
+  <tr><td>Throttle</td><td>Doing something at most once per time period.</td></tr>
+  <tr><td>requestAnimationFrame</td><td>A browser call meaning "run this just before the next screen repaint". It pauses in hidden tabs.</td></tr>
+  <tr><td>Memoization (React.memo)</td><td>A component skips redrawing when its inputs haven't changed.</td></tr>
+  <tr><td>Hook</td><td>A reusable piece of React logic, like <code>useAmpsViewport</code>.</td></tr>
+  <tr><td>StrictMode</td><td>A development-only React mode that mounts things twice to catch bugs.</td></tr>
+  <tr><td>Ref (useRef)</td><td>A value React keeps between renders without redrawing when it changes. We use refs for the buffer and the loaded window.</td></tr>
+  <tr><td>Generation</td><td>A counter that marks which fetch is the current one, so replies to older fetches are ignored.</td></tr>
+</table>
+
+<p class="mermaid-fallback" id="mermaid-fallback">The diagrams couldn't load. They need internet access to <code>cdn.jsdelivr.net</code>. The diagram source text is still shown above.</p>
+
+</main>
+</div>
+
+<script type="module">
+  try {
+    const { default: mermaid } = await import("https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs");
+    mermaid.initialize({
+      startOnLoad: false,
+      theme: "default",
+      securityLevel: "loose",
+      flowchart: { htmlLabels: true, curve: "basis" },
+      sequence: { showSequenceNumbers: false },
+    });
+    await mermaid.run({ querySelector: ".mermaid" });
+  } catch (err) {
+    console.error(err);
+    document.getElementById("mermaid-fallback").style.display = "block";
+  }
+</script>
+</body>
+</html>
